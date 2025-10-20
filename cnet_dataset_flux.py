@@ -61,14 +61,10 @@ class HSIControlNetDataset(Dataset):
     def __init__(self,
                  root_dir: str,
                  image_size: int = 512,
-                 text_encoders: Optional[List[torch.nn.Module]] = None,   # 新增
-                 tokenizers: Optional[List[PreTrainedTokenizer]] = None, # 新增
                  ):
         self.root_dir   = root_dir
-        self.preprocessed_text_dir = f"{root_dir}/embeds"
+        self.preprocessed_text_dir = f"{root_dir}/embeds_flux"
         self.image_size = image_size
-        self.text_encoders = text_encoders
-        self.tokenizers = tokenizers
         print("dataset name:",root_dir)
          # 1. 缓存路径
         cache_file = os.path.join(root_dir, '.dataset_cache.pkl')
@@ -167,7 +163,7 @@ class HSIControlNetDataset(Dataset):
         """
         a = np.concatenate([cubes[0], cubes[1]], 2)
         b = np.concatenate([cubes[2], cubes[3]], 2)
-        return np.concatenate([a, b], 1)
+        return np.concatenate([a, b], 1)*2-1
 
     def _stitch_2x2_img(self, imgs):
         """把 4 张 RGB(H,W,3) 2×2 拼 -> resize -> (3,H,W)"""
@@ -197,24 +193,58 @@ class HSIControlNetDataset(Dataset):
         cond = self._stitch_2x2_np(cubes)                # (48, 512, 512)
 
         # 3. 文本：只用第一个视角的相机配置
-        cfg = load_config(os.path.join(folders[0], 'camconf.json'))
-        text = generate_text(cfg)
+        # cfg = load_config(os.path.join(folders[0], 'camconf.json'))
+        # text = generate_text(cfg)
 
-        prompt_embeds = torch.load(os.path.join(self.preprocessed_text_dir, f"{idx}_prompt_embeds.pt"),weights_only=True)
-        text_embeds = torch.load(os.path.join(self.preprocessed_text_dir, f"{idx}_text_embeds.pt"),weights_only=True)
-
-
-        # 5. SDXL 还需要 time_ids（尺寸 + crop + target）
-        original_size = (self.image_size, self.image_size)
-        crop_coords = (0, 0)
-        target_size = (self.image_size, self.image_size)
-        time_ids = torch.tensor([[*original_size, *crop_coords, *target_size]], dtype=prompt_embeds.dtype)
-        return dict(
-            pixel_values=torch.tensor(image),                    # RGB  2×2 拼图
-            conditioning_pixel_values=torch.tensor(cond), 
-            prompt_embeds=prompt_embeds.squeeze(0),           # SDXL 双 text encoder 拼接
-            text_embeds=text_embeds.squeeze(0),               # SDXL UNet 的时间步嵌入
-            time_ids=time_ids,                     # SDXL 尺寸条件
-            text=text,                             # 可选，调试用
+        prompt_embeds = torch.load(
+            os.path.join(self.preprocessed_text_dir, f"{idx}_prompt_embeds.pt"),
+            weights_only=True
         )
+        # 加载 CLIP 池化特征（pooled_embeds，对应 pooled_prompt_embeds）
+        pooled_prompt_embeds = torch.load(
+            os.path.join(self.preprocessed_text_dir, f"{idx}_pooled_embeds.pt"),
+            weights_only=True
+        )
+        # 加载 T5 Token ID（text_ids）
+        text_ids = torch.load(
+            os.path.join(self.preprocessed_text_dir, f"{idx}_text_ids.pt"),
+            weights_only=True
+        )
+
+        text_ids_path = os.path.join(self.preprocessed_text_dir, f"{idx}_text_ids.pt")
+        text_ids = torch.load(text_ids_path, weights_only=True)
+
+        # text_ids = text_ids.unsqueeze(0).expand(prompt_embeds.shape[0], -1, -1)
+        return dict(
+            pixel_values=torch.tensor(image),                    # RGB 2×2 拼图：(3, 512, 512)
+            conditioning_pixel_values=torch.tensor(cond),        # HSI 条件：(48, 512, 512)
+            prompt_embeds=prompt_embeds.squeeze(0),              # T5 序列特征：[512, 4096]
+            pooled_prompt_embeds=pooled_prompt_embeds.squeeze(0),# CLIP 池化特征：(768)
+            text_ids=text_ids.squeeze(0),                        # T5 Token ID：(512,3)
+            time_ids=torch.tensor([self.image_size, self.image_size, 0.0]),  # 示例 time_ids，长度 3
+        )
+    
+    def with_transform(self, transform_func):
+        """
+        模仿 datasets.Dataset.with_transform 的签名，
+        返回一个 WrappedDataset，每次 __getitem__ 时先调原始数据再跑 transform_func。
+        """
+        return TransformedDataset(self, transform_func)
+    
+class TransformedDataset(torch.utils.data.Dataset):
+    """薄封装：先取原始数据，再跑 transform_func(batch)。"""
+    def __init__(self, base_ds, transform_func):
+        self.base_ds = base_ds
+        self.transform_func = transform_func
+
+    def __len__(self):
+        return len(self.base_ds)
+
+    def __getitem__(self, idx):
+        # 取一条样本（dict）
+        sample = self.base_ds[idx]
+        # transform_func 要求批处理，我们包一层列表再解包
+        batch = self.transform_func([sample])
+        return batch[0]
+
 

@@ -60,7 +60,7 @@ from diffusers.utils.hub_utils import load_or_create_model_card, populate_model_
 from diffusers.utils.import_utils import is_torch_npu_available, is_xformers_available
 from diffusers.utils.torch_utils import is_compiled_module
 from warp_and_controlnet_model import WarpAndFluxControlNetModel
-from cnet_dataset_sdxl import HSIControlNetDataset
+from cnet_dataset_flux import HSIControlNetDataset
 
 
 if is_wandb_available():
@@ -788,16 +788,17 @@ def collate_fn(examples):
     conditioning_pixel_values = torch.stack([example["conditioning_pixel_values"] for example in examples])
     conditioning_pixel_values = conditioning_pixel_values.to(memory_format=torch.contiguous_format).float()
 
-    prompt_ids = torch.stack([torch.tensor(example["prompt_embeds"]) for example in examples])
+    prompt_ids = torch.stack([example["prompt_embeds"] for example in examples])
 
-    pooled_prompt_embeds = torch.stack([torch.tensor(example["pooled_prompt_embeds"]) for example in examples])
-    text_ids = torch.stack([torch.tensor(example["text_ids"]) for example in examples])
+    pooled_prompt_embeds = torch.stack([example["pooled_prompt_embeds"] for example in examples])
+    text_ids = torch.stack([example["text_ids"] for example in examples])
+    time_ids = torch.stack([example["time_ids"] for example in examples])
 
     return {
         "pixel_values": pixel_values,
         "conditioning_pixel_values": conditioning_pixel_values,
         "prompt_ids": prompt_ids,
-        "unet_added_conditions": {"pooled_prompt_embeds": pooled_prompt_embeds, "time_ids": text_ids},
+        "unet_added_conditions": {"pooled_prompt_embeds": pooled_prompt_embeds, "text_ids": text_ids, "time_ids": time_ids},
     }
 
 
@@ -894,6 +895,7 @@ def main(args):
         revision=args.revision,
         variant=args.variant,
     )
+    flux_controlnet:WarpAndFluxControlNetModel
     if args.controlnet_model_name_or_path:
         logger.info("Loading existing controlnet weights")
         flux_controlnet = WarpAndFluxControlNetModel.from_pretrained(args.controlnet_model_name_or_path)
@@ -1065,59 +1067,15 @@ def main(args):
     vae.to(accelerator.device, dtype=weight_dtype)
     flux_transformer.to(accelerator.device, dtype=weight_dtype)
 
-    def compute_embeddings(batch, proportion_empty_prompts, flux_controlnet_pipeline, weight_dtype, is_train=True):
-        prompt_batch = batch[args.caption_column]
-        captions = []
-        for caption in prompt_batch:
-            if random.random() < proportion_empty_prompts:
-                captions.append("")
-            elif isinstance(caption, str):
-                captions.append(caption)
-            elif isinstance(caption, (list, np.ndarray)):
-                # take a random caption if there are multiple
-                captions.append(random.choice(caption) if is_train else caption[0])
-        prompt_batch = captions
-        prompt_embeds, pooled_prompt_embeds, text_ids = flux_controlnet_pipeline.encode_prompt(
-            prompt_batch, prompt_2=prompt_batch
-        )
-        prompt_embeds = prompt_embeds.to(dtype=weight_dtype)
-        pooled_prompt_embeds = pooled_prompt_embeds.to(dtype=weight_dtype)
-        text_ids = text_ids.to(dtype=weight_dtype)
-
-        # text_ids [512,3] to [bs,512,3]
-        text_ids = text_ids.unsqueeze(0).expand(prompt_embeds.shape[0], -1, -1)
-        return {"prompt_embeds": prompt_embeds, "pooled_prompt_embeds": pooled_prompt_embeds, "text_ids": text_ids}
-
-    # train_dataset = get_train_dataset(args, accelerator)
-    text_encoders = [text_encoder_one, text_encoder_two]
-    tokenizers = [tokenizer_one, tokenizer_two]
     train_dataset = HSIControlNetDataset(
         root_dir=os.path.join(args.dataset_name),
-        image_size=args.resolution,
-        text_encoders=text_encoders,  # ✅ 传进去
-        tokenizers=tokenizers,        # ✅ 传进去
+        image_size=args.resolution
     )
-    # compute_embeddings_fn = functools.partial(
-    #     compute_embeddings,
-    #     flux_controlnet_pipeline=flux_controlnet_pipeline,
-    #     proportion_empty_prompts=args.proportion_empty_prompts,
-    #     weight_dtype=weight_dtype,
-    # )
-    with accelerator.main_process_first():
-        from datasets.fingerprint import Hasher
 
-        # fingerprint used by the cache for the other processes to load the result
-        # details: https://github.com/huggingface/diffusers/pull/4038#discussion_r1266078401
-        new_fingerprint = Hasher.hash(args)
-        # train_dataset = train_dataset.map(
-        #     compute_embeddings_fn, batched=True, new_fingerprint=new_fingerprint, batch_size=50
-        # )
-
-    del text_encoders, tokenizers, text_encoder_one, text_encoder_two, tokenizer_one, tokenizer_two
     free_memory()
 
     # Then get the training dataset ready to be passed to the dataloader.
-    train_dataset = prepare_train_dataset(train_dataset, accelerator)
+    # train_dataset = prepare_train_dataset(train_dataset, accelerator)
 
     train_dataloader = torch.utils.data.DataLoader(
         train_dataset,
@@ -1142,7 +1100,7 @@ def main(args):
         args.lr_scheduler,
         optimizer=optimizer,
         num_warmup_steps=args.lr_warmup_steps * accelerator.num_processes,
-        num_training_steps=args.max_train_steps * accelerator.num_processes,
+        num_training_steps=num_training_steps_for_scheduler,
         num_cycles=args.lr_num_cycles,
         power=args.lr_power,
     )
@@ -1252,16 +1210,25 @@ def main(args):
                     pixel_latents_tmp.shape[3],
                 )
 
-                control_values = batch["conditioning_pixel_values"].to(dtype=weight_dtype)
-                control_latents = vae.encode(control_values).latent_dist.sample()
-                control_latents = (control_latents - vae.config.shift_factor) * vae.config.scaling_factor
-                control_image = FluxControlNetPipeline._pack_latents(
-                    control_latents,
-                    control_values.shape[0],
-                    control_latents.shape[1],
-                    control_latents.shape[2],
-                    control_latents.shape[3],
-                )
+                control_values = batch["conditioning_pixel_values"].to(dtype=torch.float32)
+                # # 把 controlnet 里所有 bias 都转成 FP16--lkj mark
+                # for module in flux_controlnet.modules():
+                #     if hasattr(module, 'bias') and module.bias is not None:
+                #         module.bias.data = module.bias.data.half()
+                # flux_controlnet = flux_controlnet.half()
+                # print("control_values.shape",control_values.shape)#torch.Size([1, 48, 512, 512])
+                control_latents = flux_controlnet.cond_image_to_latent(control_values)
+                # print(f"control_latents.shape: {control_latents.shape}")  # 输出 (1,64,32,32)
+
+                # 手动打包：展平空间维度（32×32=1024）→ 形状 [1, 1024, 64]
+                batch_size = control_latents.shape[0]
+                channels = control_latents.shape[1]  # 通道数=64（维度1）
+                height = control_latents.shape[2]    # 高度=32（维度2）
+                width = control_latents.shape[3]     # 宽度=32（维度3）
+
+                control_image = control_latents.permute(0, 2, 3, 1) 
+                control_image = control_latents.view(batch_size, height * width, channels)
+                # print(f"control_image.shape: {control_image.shape}")  # 应输出 (1, 1024, 64)
 
                 latent_image_ids = FluxControlNetPipeline._prepare_latent_image_ids(
                     batch_size=pixel_latents_tmp.shape[0],
@@ -1270,7 +1237,7 @@ def main(args):
                     device=pixel_values.device,
                     dtype=pixel_values.dtype,
                 )
-
+                # print("latent_image_ids",latent_image_ids)
                 bsz = pixel_latents.shape[0]
                 noise = torch.randn_like(pixel_latents).to(accelerator.device).to(dtype=weight_dtype)
                 # Sample a random timestep for each image
@@ -1307,7 +1274,7 @@ def main(args):
                     guidance=guidance_vec,
                     pooled_projections=batch["unet_added_conditions"]["pooled_prompt_embeds"].to(dtype=weight_dtype),
                     encoder_hidden_states=batch["prompt_ids"].to(dtype=weight_dtype),
-                    txt_ids=batch["unet_added_conditions"]["time_ids"][0].to(dtype=weight_dtype),
+                    txt_ids=batch["unet_added_conditions"]["text_ids"][0].to(dtype=weight_dtype),#torch.Size([512, 3])
                     img_ids=latent_image_ids,
                     return_dict=False,
                 )
@@ -1326,7 +1293,7 @@ def main(args):
                     ]
                     if controlnet_single_block_samples is not None
                     else None,
-                    txt_ids=batch["unet_added_conditions"]["time_ids"][0].to(dtype=weight_dtype),
+                    txt_ids=batch["unet_added_conditions"]["text_ids"][0].to(dtype=weight_dtype),
                     img_ids=latent_image_ids,
                     return_dict=False,
                 )[0]

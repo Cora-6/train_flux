@@ -4,6 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import Optional, Dict, Tuple, Any, Union, List
 from diffusers.models.controlnet_flux import FluxControlNetModel
+from diffusers.models.controlnets.controlnet import ControlNetConditioningEmbedding
 
 class DeformableWarp(nn.Module):
     def __init__(self, in_channels=3, hidden=32):
@@ -29,24 +30,53 @@ class DeformableWarp(nn.Module):
         grid = torch.stack((xs, ys), dim=-1)         # (H,W,2)
         grid = grid.unsqueeze(0).expand(B, H, W, 2)  # (B,H,W,2)
         return grid
+    # def forward(self, x, src_img):
+    #     """
+    #     x: features to predict flow from (could be src_img or concatenated inputs), (B,C,H,W)
+    #     src_img: image to warp, (B,Cs,H,W)
+    #     returns: warped image, flow (in pixels)
+    #     """
+    #     B, _, H, W = src_img.shape
+    #     flow_px = self.flow_net(x)  # (B,2,H,W), pixel units (dx, dy)
+    #     # convert pixel flow -> normalized flow for grid_sample
+    #     # grid_sample expects normalized coords; +dx_px corresponds to +2*dx/(W-1)
+    #     flow_norm = torch.empty_like(flow_px)
+    #     flow_norm[:, 0, :, :] = 2.0 * flow_px[:, 0, :, :] / max(W - 1, 1)  # x
+    #     flow_norm[:, 1, :, :] = 2.0 * flow_px[:, 1, :, :] / max(H - 1, 1)  # y
+    #     base_grid = self._make_base_grid(B, H, W, src_img.device, src_img.dtype)  # (B,H,W,2)
+    #     grid = base_grid + flow_norm.permute(0, 2, 3, 1)  # (B,H,W,2)
+    #     warped = F.grid_sample(
+    #         src_img, grid, mode="bilinear",
+    #         padding_mode="border", align_corners=True
+    #     )
+    #     return warped, flow_px
+
     def forward(self, x, src_img):
         """
-        x: features to predict flow from (could be src_img or concatenated inputs), (B,C,H,W)
-        src_img: image to warp, (B,Cs,H,W)
-        returns: warped image, flow (in pixels)
+        x: features to predict flow from (B,C,H,W)
+        src_img: 
+            - 4-D image: (B,Cs,H,W)  -> 正常 warp
+            - 3-D packed latent: (B,L,C) -> 直接透传，不做 warp
+        returns: 
+            warped image, flow (in pixels)
+            若 src_img 为 3-D，flow 返回 None
         """
+        # 1. 3-D packed latent -> 直接透传
+        if src_img.dim() == 3:
+            return src_img, None
+
+        # 2. 4-D image -> 正常 warp
         B, _, H, W = src_img.shape
-        flow_px = self.flow_net(x)  # (B,2,H,W), pixel units (dx, dy)
-        # convert pixel flow -> normalized flow for grid_sample
-        # grid_sample expects normalized coords; +dx_px corresponds to +2*dx/(W-1)
+        flow_px = self.flow_net(x)          # (B,2,H,W)
         flow_norm = torch.empty_like(flow_px)
-        flow_norm[:, 0, :, :] = 2.0 * flow_px[:, 0, :, :] / max(W - 1, 1)  # x
-        flow_norm[:, 1, :, :] = 2.0 * flow_px[:, 1, :, :] / max(H - 1, 1)  # y
-        base_grid = self._make_base_grid(B, H, W, src_img.device, src_img.dtype)  # (B,H,W,2)
-        grid = base_grid + flow_norm.permute(0, 2, 3, 1)  # (B,H,W,2)
+        flow_norm[:, 0] = 2.0 * flow_px[:, 0] / max(W - 1, 1)
+        flow_norm[:, 1] = 2.0 * flow_px[:, 1] / max(H - 1, 1)
+
+        base_grid = self._make_base_grid(B, H, W, src_img.device, src_img.dtype)
+        grid = base_grid + flow_norm.permute(0, 2, 3, 1)
         warped = F.grid_sample(
-            src_img, grid, mode="bilinear",
-            padding_mode="border", align_corners=True
+            src_img, grid,
+            mode='bilinear', padding_mode='border', align_corners=True
         )
         return warped, flow_px
 
@@ -84,6 +114,11 @@ class WarpAndFluxControlNetModel(FluxControlNetModel):
             )
             # warper 在 from_unet 里挂载；这里占位，确保属性存在
             self.warper: Optional[nn.Module] = DeformableWarp(in_channels=48, hidden=64)
+            self.cond_image_to_latent = ControlNetConditioningEmbedding(
+                conditioning_embedding_channels=64,  # 匹配 ControlNet 中间层（非 3！）
+                conditioning_channels=48,             # 输入 HSI 的 48 通道
+                block_out_channels=(16, 32, 64, 64, 64) # 默认中间层通道，确保空间压缩到 64×64
+            )
     
     @staticmethod
     def static_method(xxx, yyy):
@@ -109,20 +144,19 @@ class WarpAndFluxControlNetModel(FluxControlNetModel):
     # # —— 关键：覆盖 forward，签名与父类保持一致（SDXL 管线会按这个接口调用）——
     def forward(
         self,
-        sample: torch.Tensor,
-        timestep: Union[torch.Tensor, float, int],
-        encoder_hidden_states: torch.Tensor,
+        hidden_states: torch.Tensor,
         controlnet_cond: torch.Tensor,
+        controlnet_mode: torch.Tensor = None,
         conditioning_scale: float = 1.0,
-        class_labels: Optional[torch.Tensor] = None,
-        timestep_cond: Optional[torch.Tensor] = None,
-        attention_mask: Optional[torch.Tensor] = None,
-        added_cond_kwargs: Optional[Dict[str, torch.Tensor]] = None,
-        cross_attention_kwargs: Optional[Dict[str, Any]] = None,
-        guess_mode: bool = False,
+        encoder_hidden_states: torch.Tensor = None,
+        pooled_projections: torch.Tensor = None,
+        timestep: torch.LongTensor = None,
+        img_ids: torch.Tensor = None,
+        txt_ids: torch.Tensor = None,
+        guidance: torch.Tensor = None,
+        joint_attention_kwargs: Optional[Dict[str, Any]] = None,
         return_dict: bool = True,
-        **kwargs,
-    ):
+    ) :
         
         # 安全防御：确保 warper 已挂载
         if self.warper is None:
@@ -136,19 +170,18 @@ class WarpAndFluxControlNetModel(FluxControlNetModel):
         # —— 调用父类逻辑（使用调用形式以保留 hooks/AMP 等）——
         return FluxControlNetModel.forward(
             self,
-            sample=sample,
-            timestep=timestep,
-            encoder_hidden_states=encoder_hidden_states,
-            controlnet_cond=warped,
+            hidden_states=hidden_states,
+            controlnet_cond=warped,          # ✅ 关键：把 warped 传进去
+            controlnet_mode=controlnet_mode,
             conditioning_scale=conditioning_scale,
-            class_labels=class_labels,
-            timestep_cond=timestep_cond,
-            attention_mask=attention_mask,
-            added_cond_kwargs=added_cond_kwargs,
-            cross_attention_kwargs=cross_attention_kwargs,
-            guess_mode=guess_mode,
+            encoder_hidden_states=encoder_hidden_states,
+            pooled_projections=pooled_projections,
+            timestep=timestep,
+            img_ids=img_ids,
+            txt_ids=txt_ids,
+            guidance=guidance,
+            joint_attention_kwargs=joint_attention_kwargs,
             return_dict=return_dict,
-            **kwargs,
         )
     
     @classmethod
