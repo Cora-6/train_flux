@@ -937,20 +937,20 @@ def main(args):
     flux_controlnet.train()
 
     # use some pipeline function
-    flux_controlnet_pipeline = FluxControlNetPipeline(
-        scheduler=noise_scheduler,
-        vae=vae,
-        text_encoder=text_encoder_one,
-        tokenizer=tokenizer_one,
-        text_encoder_2=text_encoder_two,
-        tokenizer_2=tokenizer_two,
-        transformer=flux_transformer,
-        controlnet=flux_controlnet,
-    )
-    if args.enable_model_cpu_offload:
-        flux_controlnet_pipeline.enable_model_cpu_offload()
-    else:
-        flux_controlnet_pipeline.to(accelerator.device)
+    # flux_controlnet_pipeline = FluxControlNetPipeline(
+    #     scheduler=noise_scheduler,
+    #     vae=vae,
+    #     text_encoder=text_encoder_one,
+    #     tokenizer=tokenizer_one,
+    #     text_encoder_2=text_encoder_two,
+    #     tokenizer_2=tokenizer_two,
+    #     transformer=flux_transformer,
+    #     controlnet=flux_controlnet,
+    # )
+    # if args.enable_model_cpu_offload:
+    #     flux_controlnet_pipeline.enable_model_cpu_offload()
+    # else:
+    #     flux_controlnet_pipeline.to(accelerator.device)
 
     def unwrap_model(model):
         model = accelerator.unwrap_model(model)
