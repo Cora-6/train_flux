@@ -1224,7 +1224,7 @@ def main(args):
                     pixel_latents_tmp.shape[3],
                 )
 
-                control_values = batch["conditioning_pixel_values"].to(dtype=torch.float32)
+                control_values = batch["conditioning_pixel_values"].to(dtype=weight_dtype)
                 control_latents = flux_controlnet.cond_image_to_latent(control_values)
                 # print(f"control_latents.shape: {control_latents.shape}")  # 输出 (1,64,32,32)
 

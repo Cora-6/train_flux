@@ -13,8 +13,8 @@ accelerate launch --num_processes 2 train_controlnet_flux_warp.py\
  --train_batch_size=1 \
  --gradient_accumulation_steps=32 \
  --gradient_checkpointing \
- --dataloader_num_workers 8
-#  --mixed_precision="bf16"
+ --dataloader_num_workers 8 \
+ --mixed_precision="bf16"
 #  --resume_from_checkpoint='/data/output_sdxl_large_dataset_warp/checkpoint-32500'
 #  --validation_image "/data/result_sphere/stitch/2025-03-07_11-20-44/render_h_transformed_hsi.mat" "/home/viplab/diffusers/examples/controlnet/mytry/dataset/result/2025-02-10_11-01-49"
 #  --validation_prompt "city view"\
