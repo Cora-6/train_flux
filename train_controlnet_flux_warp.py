@@ -62,6 +62,19 @@ from diffusers.utils.torch_utils import is_compiled_module
 from warp_and_controlnet_model import WarpAndFluxControlNetModel
 from cnet_dataset_flux import HSIControlNetDataset
 
+from accelerate import Accelerator
+from accelerate.utils import DeepSpeedPlugin
+
+# Option 1: Using DeepSpeedPlugin
+deepspeed_plugin = DeepSpeedPlugin(
+    zero_stage=2, # Example: configure DeepSpeed ZeRO Stage 3
+    gradient_accumulation_steps=32,
+)
+# accelerator = Accelerator(deepspeed_plugin=deepspeed_plugin)
+
+# Option 2: Using a DeepSpeed config file
+# accelerator = Accelerator(deepspeed_config_file="deepspeed_config.json")
+
 
 if is_wandb_available():
     import wandb
@@ -824,6 +837,7 @@ def main(args):
         mixed_precision=args.mixed_precision,
         log_with=args.report_to,
         project_config=accelerator_project_config,
+        deepspeed_plugin=deepspeed_plugin,
     )
 
     # Disable AMP for MPS. A technique for accelerating machine learning computations on iOS and macOS devices.
@@ -1211,12 +1225,6 @@ def main(args):
                 )
 
                 control_values = batch["conditioning_pixel_values"].to(dtype=torch.float32)
-                # # 把 controlnet 里所有 bias 都转成 FP16--lkj mark
-                # for module in flux_controlnet.modules():
-                #     if hasattr(module, 'bias') and module.bias is not None:
-                #         module.bias.data = module.bias.data.half()
-                # flux_controlnet = flux_controlnet.half()
-                # print("control_values.shape",control_values.shape)#torch.Size([1, 48, 512, 512])
                 control_latents = flux_controlnet.cond_image_to_latent(control_values)
                 # print(f"control_latents.shape: {control_latents.shape}")  # 输出 (1,64,32,32)
 

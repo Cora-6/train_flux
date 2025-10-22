@@ -155,7 +155,7 @@ def encode_all(
 
 # ---------- 5. 主流程（删除原保存代码，调用新 encode_all） ----------
 def main():
-    root_dir = "/data/train"
+    root_dir = "../data/train"
     save_dir = f"{root_dir}/embeds_flux"
     os.makedirs(save_dir, exist_ok=True)
 
@@ -240,7 +240,7 @@ if __name__ == "__main__":
 # %%
 import os, glob, pickle
 
-root = "/data/train"
+root = "../data/train"
 embed_dir = f"{root}/embeds_flux"
 
 # 1. 二层文件夹数（只拿第一个子目录）

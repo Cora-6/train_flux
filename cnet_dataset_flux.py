@@ -116,7 +116,7 @@ class HSIControlNetDataset(Dataset):
         print("folders len", len(folders))
         print("groups  len", len(groups))
         # 3. 全局 HSI 数据（仅加载一次）
-        self.hsi_path = '/data/try_small/result_new/Houston18.mat'
+        self.hsi_path = '../data/try_small/result_new/Houston18.mat'
         with h5py.File(self.hsi_path, 'r') as f:
             self.hsi = np.array(f['ori_data'])          # (C,H,W)
         self.hsi_norm = self.hsi / (self.hsi.max((1,2), keepdims=True) + 1e-8)
