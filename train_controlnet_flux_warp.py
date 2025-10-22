@@ -877,25 +877,25 @@ def main(args):
 
     # Load the tokenizers
     # load clip tokenizer
-    tokenizer_one = AutoTokenizer.from_pretrained(
-        args.pretrained_model_name_or_path,
-        subfolder="tokenizer",
-        revision=args.revision,
-    )
-    # load t5 tokenizer
-    tokenizer_two = AutoTokenizer.from_pretrained(
-        args.pretrained_model_name_or_path,
-        subfolder="tokenizer_2",
-        revision=args.revision,
-    )
-    # load clip text encoder
-    text_encoder_one = CLIPTextModel.from_pretrained(
-        args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision, variant=args.variant
-    )
-    # load t5 text encoder
-    text_encoder_two = T5EncoderModel.from_pretrained(
-        args.pretrained_model_name_or_path, subfolder="text_encoder_2", revision=args.revision, variant=args.variant
-    )
+    # tokenizer_one = AutoTokenizer.from_pretrained(
+    #     args.pretrained_model_name_or_path,
+    #     subfolder="tokenizer",
+    #     revision=args.revision,
+    # )
+    # # load t5 tokenizer
+    # tokenizer_two = AutoTokenizer.from_pretrained(
+    #     args.pretrained_model_name_or_path,
+    #     subfolder="tokenizer_2",
+    #     revision=args.revision,
+    # )
+    # # load clip text encoder
+    # text_encoder_one = CLIPTextModel.from_pretrained(
+    #     args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision, variant=args.variant
+    # )
+    # # load t5 text encoder
+    # text_encoder_two = T5EncoderModel.from_pretrained(
+    #     args.pretrained_model_name_or_path, subfolder="text_encoder_2", revision=args.revision, variant=args.variant
+    # )
 
     vae = AutoencoderKL.from_pretrained(
         args.pretrained_model_name_or_path,
@@ -932,8 +932,8 @@ def main(args):
     noise_scheduler_copy = copy.deepcopy(noise_scheduler)
     vae.requires_grad_(False)
     flux_transformer.requires_grad_(False)
-    text_encoder_one.requires_grad_(False)
-    text_encoder_two.requires_grad_(False)
+    # text_encoder_one.requires_grad_(False)
+    # text_encoder_two.requires_grad_(False)
     flux_controlnet.train()
 
     # use some pipeline function
