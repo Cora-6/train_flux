@@ -183,7 +183,7 @@ class HSIControlNetDataset(Dataset):
         target_subimage_size = self.image_size // 2
 
         # 1. 2×2 RGB 拼接
-        imgs_3d = [load_image(os.path.join(f, 'render_3d.png')) for f in folders]
+        imgs_3d = [load_image(os.path.join(f, 'render_3d.jpg')) for f in folders]
         image = self._stitch_2x2_img(imgs_3d)            # (3, 512, 512)
 
         # 2. 2×2 HSI 拼接
